@@ -9,9 +9,12 @@ module Decs
 
 macro dec_str(s, flags...) parse(Dec, s) end
 
-import Base: ==, +, -, *, /, <, float, inv, round
+# Note: I don't implement the number() function that Decimals had
+# (I don't believe it should be part of the API)
 
-export Dec, dec, @dec_str, number, normalize
+import Base: ==, +, -, *, /, <, inv, round
+
+export Dec, dec, @dec_str
 
 const DIGITS = 20
 
@@ -23,12 +26,19 @@ struct Dec <: AbstractFloat
     val::BigInt # value
 end
 
-Dec(val::Integer, scl) = Dec(val < 0, scl, abs(val))
+Dec(x::Dec) = x
+Dec(x::Real) = parse(Dec, string(x))
+Dec(x::Integer, scl=0) = Dec(x < 0, scl, abs(x))
 
-const dectab = Vector{BigInt}(undef, 38)
+# Until I change to use DecFP for speed and to be able to support +-Inf and NaN:
+Base.isfinite(x::Dec) = true
+Base.isnan(x::Dec) = false
+
+const dectab = Vector{BigInt}(undef, 128)
+const rndtab = Vector{BigInt}(undef, 128)
 
 function __init__()
-    for p = 1:38; dectab[p] = BigInt(10)^p; end
+    for p = 1:length(dectab); v = BigInt(10)^p; dectab[p] = v; rndtab[p] = div(v, 2); end
 end
 
 # Primitives to help make these functions more generic later on
@@ -41,6 +51,7 @@ _getsign(x::Integer) = x < 0
 
 _getcoeff(x::Dec) = x.val
 _getcoeff(x::Integer) = BigInt(abs(x))
+_getcoeff(x::BigInt) = x
 
 _getint(x::Dec) = x.val
 _getint(x::Integer) = abs(x)
@@ -48,7 +59,9 @@ _getint(x::Integer) = abs(x)
 _getscale(x::Dec) = x.pow
 _getscale(x::Integer) = 0
 
-_scale(x, d) = _getcoeff(x) * (d > length(dectab) ? BigInt(10)^d : dectab[d])
+_rnd10(d) = d > length(dectab) ? div(BigInt(10)^d, 2) : rndtab[d]
+_pow10(d) = d > length(dectab) ? BigInt(10)^d : dectab[d]
+_scale(x, d) = _getcoeff(x) * _pow10(d)
 
 _eq(x::IntDec, y::IntDec) = _getint(x) == _getint(y)
 
@@ -63,12 +76,12 @@ Base.promote_rule(::Type{BigInt}, ::Type{Dec}) = Dec
 
 # Addition
 function +(x::Dec, y::IntDec)
-    # Quickly deal with zero case, so as not to worry about -0.0 cases
-    iszero(x) && return y
-    iszero(y) && return x
-    # Make both the same scale
     xscl = _getscale(x)
     yscl = _getscale(y)
+    # Quickly deal with zero case, make sure sign is correct in -0.0 + -0.0 case
+    iszero(x) && return iszero(y) ? Dec(_getsign(x) & _getsign(y), 0, min(xscl, yscl)) : y
+    iszero(y) && return x
+    # Make both the same scale
     dscl = xscl - yscl
     if dscl == 0
         xval = _getcoeff(x)
@@ -105,39 +118,118 @@ function Base.inv(x::Dec)
     b = ('.' in str) ? length(split(str, '.')[1]) : 0
     c = round(BigInt(10)^(-x.pow + DIGITS) / x.val)
     q = (x.pow < 0) ? 1 - b - DIGITS : -b - DIGITS
-    normalize(Dec(x.sgn, q, c))
+    #normalize(Dec(x.sgn, q, c))
+    Dec(x.sgn, q, c)
 end
 
 # Division
-/(x::Dec, y::Dec) = x * inv(y)
+function /(x::Dec, y::Dec)
+    x * inv(y)
+end
 
 # TODO exponentiation
+
+@noinline argerr(str) = throw(ArgumentError("cannot parse \"$str\" as Dec"))
+
+function _makedec(sgn, str, begpos, pos)
+    #println("_makedec($sgn, \"$str\", $begpos, $pos) => $(pos-begpos) \"", str[begpos:pos-1], '"')
+    (pos - begpos < 19
+     ? Dec(sgn, 0, parse(Int64, str[begpos:pos-1]))
+     : Dec(sgn, 0, parse(BigInt, str[begpos:pos-1])))
+end
+
+function _makedec(sgn, str, begpos, frcpos, frcend, scl)
+    #println("_makedec($sgn, \"$str\", $begpos, $frcpos, $frcend, $scl) => \"",
+    #str[begpos:frcpos-1], '"')
+    v = begpos == frcpos ? BigInt(0) : parse(BigInt, str[begpos:frcpos-1])
+    frcpos == frcend && return Dec(sgn, scl, v)
+    diff = frcend - frcpos - 1
+    #println("sgn = $sgn diff = $diff v = $v scl = $scl, \"", str[frcpos+1:frcend-1], '"')
+    Dec(sgn, scl - diff, v * _pow10(diff) + parse(BigInt, str[frcpos+1:frcend-1]))
+end
 
 # Convert a string to a decimal, e.g. "0.01" -> Dec(0, -2, 1)
 function Base.parse(::Type{Dec}, str::AbstractString)
     # start with +, -, 0, 1-9 or .
+    (siz = sizeof(str)) == 0 && argerr(str)
+    pos = 1
+    c = str[pos]
+    sgn = false
+    if c == '+'
+        (pos += 1) > siz && argerr(str)
+        c = str[pos]
+    elseif c == '-'
+        (pos += 1) > siz && argerr(str)
+        c = str[pos]
+        sgn = true
+    end
+    # 'e' or 'E' is not allowed before having at least one digit
+    (c == 'e' || c == 'E') && argerr(str)
     # may have any number of leading 0s, ignore them
-    'e' in str && return parse(Dec, scinote(str))
-    c, q = parameters(('.' in str) ? split(str, '.') : str)
-    Dec((str[1] == '-') ? 1 : 0, q, c)
+    begpos = pos
+    while c == '0'
+        (pos += 1) > siz && return Dec(sgn, 0, 0)
+        c = str[pos]
+    end
+    # Look for an immediate '.' (i.e. only fractional part)
+    if c == '.'
+        # if the string ends here, it must have had at least one leading zero to be well formed
+        # "-.", "+." and "." are not valid, "-0.", "+0." and "0." are valid
+        if (pos += 1) > siz
+            begpos == siz && argerr(str)
+            return Dec(sgn, 0, 0)
+        end
+        begpos = pos
+        while (c = str[pos]) == '0'
+            (pos += 1) > siz && return Dec(sgn, pos - begpos, 0)
+        end
+        # Now we can have 'e', 'E', or digits
+        (c == 'e' || c == 'E') && return Dec(sgn, parse(Int32, str[pos+1:siz]) - (pos - begpos), 0)
+        frcpos = pos
+        while isdigit(c)
+            # pos == siz && println("sgn = $sgn, zer = $zer str = \"", str[frcpos:siz], '"')
+            (pos += 1) > siz && return Dec(sgn, begpos - pos, parse(BigInt, str[frcpos:siz]))
+            c = str[pos]
+        end
+        (c == 'e' || c == 'E') || argerr(str)
+        #println("sgn = $sgn v = ", parse(BigInt, str[frcpos:pos-1]), " scl = ",
+        #parse(Int32, str[pos+1:siz]) - zer)
+        return Dec(sgn, parse(Int32, str[pos+1:siz]) - (pos - begpos),
+                   parse(BigInt, str[frcpos:pos-1]))
+    end
+    begpos = pos
+    # We can have 'e', 'E', or digits 1-9 now
+    while isdigit(c)
+        (pos += 1) > siz && return _makedec(sgn, str, begpos, pos)
+        c = str[pos]
+    end
+    # We can have '.', 'e', 'E' now
+    frcpos = pos
+    if c == '.'
+        (pos += 1) > siz && return _makedec(sgn, str, begpos, pos-1)
+        c = str[pos]
+        while isdigit(c)
+            (pos += 1) > siz && return _makedec(sgn, str, begpos, frcpos, pos, 0)
+            c = str[pos]
+        end
+    end
+    frcend = pos
+    # We can now have only 'e' or 'E'
+    (c == 'e' || c == 'E' || pos < siz) || argerr(str)
+    # We can only have '+', '-', or digit(s) now
+    c = str[pos += 1]
+    (c == '+' || c == '-') && pos < siz && (c = str[pos += 1])
+    # Must have at least one digit
+    while isdigit(c)
+        (pos += 1) > siz &&
+            return _makedec(sgn, str, begpos, frcpos, frcend, parse(Int32, str[frcend+1:siz]))
+        c = str[pos]
+    end
+    argerr(str)
 end
 
-dec(str::AbstractString) = parse(Dec, str)
-
-# Convert a number to a decimal
-Dec(num::Real) = parse(Dec, string(num))
-Base.convert(::Type{Dec}, num::Real) = Dec(num::Real)
 dec(x::Real) = Dec(x)
-Dec(x::Dec) = x
-
-# Get Dec constructor parameters from string
-parameters(x::AbstractString) = (abs(parse(BigInt, x)), 0)
-
-# Get Dec constructor parameters from array
-function parameters(x::Array)
-    c = parse(BigInt, join(x))
-    (abs(c), -length(x[2]))
-end
+dec(str::AbstractString) = parse(Dec, String(str))
 
 const strzeros = repeat('0', 256)
 
@@ -146,23 +238,6 @@ function outzeros(io::IO, cnt::Integer)
         print(io, strzeros)
     end
     print(io, strzeros[1:(cnt&255)])
-end
-
-# Get decimal() argument from scientific notation
-function scinote(str::AbstractString)
-    s = (str[1] == '-') ? "-" : ""
-    n, expo = split(str, 'e')
-    n = split(n, '.')
-    if s == "-"
-        n[1] = n[1][2:end]
-    end
-    if parse(Int64, expo) > 0
-        shift = parse(Int64, expo) - ((length(n) == 2) ? length(n[2]) : 0)
-        s * join(n) * (shift < 0 ? "" : repeat("0", shift))
-    else
-        shift = -parse(Int64, expo) - ((length(n) == 2) ? length(n[1]) : length(n))
-        s * "0." * (shift < 0 ? "" : repeat("0", shift)) * join(n)
-    end
 end
 
 # Convert a decimal to a string
@@ -189,12 +264,33 @@ Base.zero(::Type{Dec}) = Dec(0, 0, 0)
 Base.one(::Type{Dec})  = Dec(0, 0, 1)
 
 # convert a decimal to any subtype of Real
-(::Type{T})(x::Dec) where {T<:Real} = parse(T, string(x))
+#Base.convert(::Type{T}, x::Dec) where {T<:Real} =  parse(T, string(x))
 
-# Convert a decimal to an integer if possible, a float if not
-function number(x::Dec)
-    ix = (str = string(x) ; fx = parse(Float64, str); round(Int64, fx))
-    (ix == fx) ? ix : fx
+(::Type{T})(x::Dec) where {T<:Integer} = parse(T, string(x))
+(::Type{T})(x::Dec) where {T<:AbstractFloat} = parse(T, string(x))
+(::Type{Rational{T}})(x::Dec) where {T<:Integer} = convert(Rational{T}, x)
+(::Type{Rational{BigInt}})(x::Dec) = convert(Rational{BigInt}, x)
+
+# fast case for Rationals
+function Base.convert(::Type{T}, x::Dec) where {T<:Rational{<:Signed}}
+    scl = _getscale(x)
+    val = _getsign(x) ? -x.val : x.val
+    scl < 0 ? T(val, _pow10(-scl)) : T(scl == 0 ? val : val * _pow10(scl), 1)
+end
+
+@noinline _inexact(T, x) = throw(InexactError(:convert, T, x))
+
+# fast case for Integers
+function Base.convert(::Type{T}, x::Dec) where {T<:Signed}
+    scl = _getscale(x)
+    val = _getsign(x) ? -x.val : x.val
+    if scl < 0
+        d, r = divrem(val, _pow10(-scl))
+        r == 0 || _inexact(T, x)
+        T(d)
+    else
+        T(scl == 0 ? val : val * _pow10(scl))
+    end
 end
 
 # sign
@@ -251,31 +347,25 @@ function <(x::Integer, y::Dec)
         (dscl < 0 ? _lt(_scale(x, -dscl), y) : _lt(x, _scale(y, dscl))), ysgn)
 end
 
+# 12345e-2 rounded to -1, you want 12e1
+# 12345e-4 rounded to 0, you want to divrem by _pow10(-scl)
+# 12345e-4 rounded to 3, you want to divrem by _pow10(-scl-digits)
+# 12345e-4 rounded to >= 4, return x
 # Rounding
-function round(x::Dec; digits::Int=0, normal::Bool=false)
-    shift = BigInt(digits) + x.pow
-    if !(shift > BigInt(0) || shift < x.pow)
-        c = Base.round(x.val / BigInt(10)^(-shift))
-        x = Dec(x.sgn, x.pow - shift, BigInt(c))
+function Base._round_digits(x::Dec, r::RoundingMode, digits::Integer, base)
+    base != 10 && error("base=$base not implemented for type Dec yet")
+    (scl = _getscale(x) + digits) >= 0 && return x
+    d, r = divrem(_getint(x), _pow10(-scl))
+    c = cmp(r, _rnd10(-scl))
+    #println("scl = $scl, d = $d, r = $r, c = $c")
+    if c != 0
+        flg = (c < 0)
+    elseif r === RoundNearest
+        flg = iseven(d)
+    else
+        error("Rounding mode $r not implemented for type Dec yet")
     end
-    normal ? x : normalize(x, rounded=true)
-end
-
-# Normalization: remove trailing zeros in coefficient
-function normalize(x::Dec; rounded::Bool=false)
-    # Note: this is very inefficient
-    # First, one can count the trailing zero bits, and that will give an indication
-    # of the maximum 0 digits (because 10 is 5*2)
-    p = 0
-    if x.val != 0
-        while x.val % BigInt(10)^(p+1) == 0
-            p += 1
-        end
-    end
-    c, r = divrem(x.val, BigInt(10)^p)
-    q = (c == 0 && !x.sgn) ? 0 : x.pow + p
-    v = Dec(x.sgn, q, abs(c))
-    rounded ? v : round(v, digits=DIGITS, normal=true)
+    Dec(_getsign(x), -digits, flg ? d : d + 1)
 end
 
 end # Decs

@@ -75,11 +75,11 @@ end
     for (d, s, v, T) in testdecs
         @test string(d) == s
         @test T(d) == v
-        @test number(d) == v
+        #@test number(d) == v
     end
     @test string(Float64(Dec(543, 0))) == "543.0"
-    @test string(number(Dec(543, 0)))  == "543"
-    @test string(number(Dec(543, -1))) == "54.3"
+    #@test string(number(Dec(543, 0)))  == "543"
+    #@test string(number(Dec(543, -1))) == "54.3"
 end
 
 @testset "Float32" begin
@@ -87,14 +87,14 @@ end
     d = Dec(1, -2)
     @test string(d) == "0.01"
     @test Float32(d) == 0.01f0
-    @test number(d) == 0.01
+    #@test number(d) == 0.01
 end
 
 @testset "BigFloat" begin
     d = Dec(-123, -3)
     @test string(d) == "-0.123"
     @test BigFloat(d) == big"-0.123"
-    @test number(d) == -0.123
+    #@test number(d) == -0.123
 end
 
 end # constructor
@@ -103,8 +103,8 @@ end # constructor
 
 @test Dec(-151100, -4) == Dec(-1511, -2)
 @test Dec(100100, -5) == Dec(1001, -3)
-@test normalize(Dec(-151100, -4)) == Dec(-1511, -2)
-@test normalize(Dec(100100, -5)) == Dec(1001, -3)
+#@test normalize(Dec(-151100, -4)) == Dec(-1511, -2)
+#@test normalize(Dec(100100, -5)) == Dec(1001, -3)
 @test dec"3.0"    == Dec(3, 0)
 @test dec"3.0"    == Dec(30, -1)
 @test dec"3.1400" == Dec(314, -2)
