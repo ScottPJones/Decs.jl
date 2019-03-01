@@ -240,23 +240,37 @@ function outzeros(io::IO, cnt::Integer)
     print(io, strzeros[1:(cnt&255)])
 end
 
+Base.tostr_sizehint(x::Dec) =
+    Base.GMP.MPZ.sizeinbase(x.val, 10) + (x.pow == 0 ? ndigits(x.pow) + 3 : 1)
+
 # Convert a decimal to a string
 function Base.print(io::IO, x::Dec)
     x.sgn && print(io, '-')
-    if x.pow < 0
+    scl = x.pow
+    if scl < 0
         c = string(x.val)
-        shift = x.pow + length(c)
+        len = sizeof(c)
+        shift = scl + len
         if shift > 0
-            print(io, c[1:shift], '.', c[(shift+1):end])
+            print(io, c[1:shift], '.', c[(shift+1):len])
+        elseif shift == 0
+            print(io, "0.", c)
+        elseif shift > -4
+            print(io, "0.") ; outzeros(io, -shift) ; print(io, c)
         else
-            print(io, "0.")
-            outzeros(io, -shift)
-            print(io, c)
+            print(io, c, 'e', scl)
         end
     else
         print(io, x.val)
-        x.pow > 0 && outzeros(io, x.pow)
+        if scl > 2
+            print(io, 'e', scl)
+        elseif scl == 2
+            print(io, "00")
+        elseif scl == 1
+            print(io, '0')
+        end
     end
+    # x.sgn ? x.pow == 0 ? print(io, '-', x.val) : print(io, '-', x.val, 'e', x.pow)
 end
 
 # Zero/one value
